@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <stdint.h>
 
 class Quissh {
 public:

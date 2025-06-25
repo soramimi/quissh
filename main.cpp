@@ -1,4 +1,5 @@
 #include "Quissh.h"
+#include <cstring>
 
 
 #define HOST "192.168.0.10"
