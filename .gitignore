@@ -1,0 +1,9 @@
+build/
+*.user
+main.d
+main.o
+myapp
+
+
+lib/
+_bin/
