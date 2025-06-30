@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 class Quissh {
+	friend class DIR;
 public:
 	struct PasswdAuth {
 		std::string uid;
@@ -130,6 +131,24 @@ public:
 
 		bool push(std::string const &local_path, std::string remote_path);
 	};
+
+	class DIR {
+	private:
+		struct Private;
+		Private *m;
+		Quissh &quissh_;
+		DIR(DIR const &) = delete;
+		DIR &operator=(DIR const &) = delete;
+		DIR(DIR &&) = delete;
+		DIR &operator=(DIR &&) = delete;
+	public:
+		DIR(Quissh &quissh);
+		~DIR();
+		bool opendir(char const *path);
+		void closedir();
+		std::optional<FileAttribute> readdir();
+	};
+
 };
 
 #endif // QUISSH_H

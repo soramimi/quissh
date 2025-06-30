@@ -7,3 +7,4 @@ myapp
 
 lib/
 _bin/
+work/.qmake.stash

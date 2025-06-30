@@ -77,28 +77,24 @@ bool Quissh::exec(char const *command, std::function<bool(char const *, int)> wr
 	char buffer[256];
 	int nbytes;
 
-	// チャネルの作成
 	m->channel = ssh_channel_new(m->session);
 	if (m->channel == NULL) {
 		fprintf(stderr, "Failed to create SSH channel\n");
 		return false;
 	}
 
-	// チャネルを開く
 	rc = ssh_channel_open_session(m->channel);
 	if (rc != SSH_OK) {
 		fprintf(stderr, "Failed to open SSH channel: %s\n", ssh_get_error(m->session));
 		return false;
 	}
 
-	// コマンドの実行
 	rc = ssh_channel_request_exec(m->channel, command);
 	if (rc != SSH_OK) {
 		fprintf(stderr, "Failed to execute command: %s\n", ssh_get_error(m->session));
 		return false;
 	}
 
-	// コマンド結果を読み取る
 	while ((nbytes = ssh_channel_read(m->channel, buffer, sizeof(buffer), 0)) > 0) {
 		writer(buffer, nbytes);
 	}
@@ -113,21 +109,17 @@ void Quissh::clear_error()
 
 bool Quissh::open(char const *host, int port, AuthVar authdata)
 {
-	bool ret = false;
 	int rc;
 
-	// SSHセッションの初期化
 	m->session = ssh_new();
 	if (!m->session) {
 		fprintf(stderr, "Failed to create SSH session.\n");
 		return false;
 	}
 
-	// サーバのホスト情報の設定
 	ssh_options_set(m->session, SSH_OPTIONS_HOST, host);
 	ssh_options_set(m->session, SSH_OPTIONS_PORT, &port);
 
-	// サーバへ接続
 	rc = ssh_connect(m->session);
 	if (rc != SSH_OK) {
 		fprintf(stderr, "Error connecting to %s: %s\n", host, ssh_get_error(m->session));
@@ -191,21 +183,18 @@ bool Quissh::scp_push_file(std::string const &path, std::function<int(char *, in
 
 	int rc;
 
-	// SCPセッションを初期化
 	m->scp = ssh_scp_new(m->session, SSH_SCP_WRITE | SSH_SCP_RECURSIVE, dir.c_str());
 	if (!m->scp) {
 		fprintf(stderr, "Failed to create SCP session: %s\n", ssh_get_error(m->session));
 		return false;
 	}
 
-	// SCPセッションを開く
 	rc = ssh_scp_init(m->scp);
 	if (rc != SSH_OK) {
 		fprintf(stderr, "Failed to initialize SCP: %s\n", ssh_get_error(m->session));
 		return false;
 	}
 
-	// SCPでファイルをリモートサーバにコピー
 	rc = ssh_scp_push_file(m->scp, name.c_str(), size, 0644);
 	if (rc != SSH_OK) {
 		fprintf(stderr, "SCP push failed: %s\n", ssh_get_error(m->session));
@@ -226,18 +215,15 @@ bool Quissh::scp_push_file(std::string const &path, std::function<int(char *, in
 bool Quissh::sftp_open()
 {
 	if (!m->sftp) {
-		// SFTPセッションを初期化
 		m->sftp = sftp_new(m->session);
 		if (!m->sftp) {
 			fprintf(stderr, "Failed to create SFTP session: %s\n", ssh_get_error(m->session));
 			return false;
 		}
 
-		// SFTPセッションを開く
 		int rc = sftp_init(m->sftp);
 		if (rc != SSH_OK) {
 			fprintf(stderr, "Failed to initialize SFTP: %s\n", ssh_get_error(m->session));
-			// sftp_free(m->sftp);
 			return false;
 		}
 	}
@@ -286,32 +272,13 @@ std::optional<std::vector<Quissh::FileAttribute>> Quissh::sftp_ls(std::string co
 {
 	std::vector<FileAttribute> ret;
 
-	sftp_dir dir;
-	sftp_attributes attributes;
-	int rc;
-
-	dir = sftp_opendir(m->sftp, path.c_str());
-	if (!dir) {
-		fprintf(stderr, "Directory not opened: %s\n", ssh_get_error(m->session));
-		return std::nullopt;
+	DIR d(*this);
+	d.opendir(path.c_str());
+	while (auto a = d.readdir()) {
+		ret.push_back(*a);
 	}
+	d.closedir();
 
-	while ((attributes = sftp_readdir(m->sftp, dir)) != NULL) {
-		ret.push_back(make_file_attribute(attributes));
-		sftp_attributes_free(attributes);
-	}
-
-	if (!sftp_dir_eof(dir)) {
-		fprintf(stderr, "Can't list directory: %s\n", ssh_get_error(m->session));
-		sftp_closedir(dir);
-		return std::nullopt;
-	}
-
-	rc = sftp_closedir(dir);
-	if (rc != SSH_OK) {
-		fprintf(stderr, "Can't close directory: %s\n", ssh_get_error(m->session));
-		return std::nullopt;
-	}
 	return ret;
 }
 
@@ -329,11 +296,9 @@ bool Quissh::sftp_push_file(std::string const &path, std::function<int(char *, i
 {
 	if (!sftp_open()) return false;
 
-	// ファイルをリモートサーバにコピー
 	sftp_file file = ::sftp_open(m->sftp, path.c_str(), O_WRONLY | O_CREAT, 0644);
 	if (!file) {
 		fprintf(stderr, "Failed to open file: %s\n", ssh_get_error(m->session));
-		// sftp_free(m->sftp);
 		return false;
 	}
 
@@ -358,7 +323,6 @@ bool Quissh::scp_pull_file(std::function<bool(char const *, int)> writer) // scp
 	int total = 0;
 
 	if (!m->sftp) {
-		// SCPセッションの初期化
 		m->scp = ssh_scp_new(m->session, SSH_SCP_READ, remote_file.c_str());
 		if (m->scp == NULL) {
 			fprintf(stderr, "Error initializing SCP session: %s\n", ssh_get_error(m->session));
@@ -381,7 +345,6 @@ bool Quissh::scp_pull_file(std::function<bool(char const *, int)> writer) // scp
 	// auto *filename = ssh_scp_request_get_filename(scp_);
 	// auto mode = ssh_scp_request_get_permissions(scp_);
 
-	// リモートファイルの受け入れ
 	if (ssh_scp_accept_request(m->scp) != SSH_OK) {
 		fprintf(stderr, "Error accepting SCP request: %s\n", ssh_get_error(m->session));
 		return false;
@@ -396,7 +359,6 @@ bool Quissh::scp_pull_file(std::function<bool(char const *, int)> writer) // scp
 			break;
 		}
 
-		// printf("%d\n", nbytes);
 		if (writer(buffer, nbytes) < 1) break;
 		total += nbytes;
 	}
@@ -410,21 +372,18 @@ bool Quissh::sftp_pull_file(std::string const &remote_path, std::function<int(ch
 	sftp_file file;
 	int rc;
 
-	// SFTPセッションを初期化
 	sftp = sftp_new(m->session);
 	if (!sftp) {
 		fprintf(stderr, "Failed to create SFTP session: %s\n", ssh_get_error(m->session));
 		return false;
 	}
 
-	// SFTPセッションを開く
 	rc = sftp_init(sftp);
 	if (rc != SSH_OK) {
 		fprintf(stderr, "Failed to initialize SFTP: %s\n", ssh_get_error(m->session));
 		return false;
 	}
 
-	// ファイルをリモートサーバからコピー
 	file = ::sftp_open(sftp, remote_path.c_str(), O_RDONLY, 0);
 	if (!file) {
 		fprintf(stderr, "Failed to open file: %s\n", ssh_get_error(m->session));
@@ -432,7 +391,6 @@ bool Quissh::sftp_pull_file(std::string const &remote_path, std::function<int(ch
 		return false;
 	}
 
-	// ファイルの内容を読み取る
 	char buffer[1024];
 	int nbytes;
 	while ((nbytes = sftp_read(file, buffer, sizeof(buffer))) > 0) {
@@ -648,3 +606,50 @@ bool Quissh::FileAttribute::islink() const
 {
 	return type == SSH_FILEXFER_TYPE_SYMLINK;
 }
+
+//
+
+struct Quissh::DIR::Private {
+	sftp_dir dir = nullptr;
+};
+
+Quissh::DIR::DIR(Quissh &quissh)
+	: m(new Private)
+	, quissh_(quissh)
+{
+}
+
+Quissh::DIR::~DIR()
+{
+	closedir();
+	delete m;
+}
+
+bool Quissh::DIR::opendir(const char *path)
+{
+	m->dir = sftp_opendir(quissh_.m->sftp, path);
+	return (bool)m->dir;
+}
+
+void Quissh::DIR::closedir()
+{
+	if (m->dir) {
+		int rc = sftp_closedir(m->dir);
+		if (rc != SSH_OK) {
+			fprintf(stderr, "Can't close directory: %s\n", ssh_get_error(quissh_.m->session));
+		}
+		m->dir = nullptr;
+	}
+}
+
+std::optional<Quissh::FileAttribute> Quissh::DIR::readdir()
+{
+	FileAttribute ret;
+	sftp_attributes a = sftp_readdir(quissh_.m->sftp, m->dir);
+	if (!a) return std::nullopt;
+	ret = make_file_attribute(a);
+	sftp_attributes_free(a);
+	return ret;
+}
+
+//
