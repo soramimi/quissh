@@ -12,6 +12,347 @@
 #include <unistd.h>
 #endif
 
+// パスの安全性をチェックする関数群
+namespace {
+// パスを正規化する（../, ./, 重複する/を処理）
+std::string normalize_path(std::string const &path)
+{
+	std::vector<std::string> components;
+	std::string current;
+
+	for (char c : path) {
+		if (c == '/') {
+			if (!current.empty()) {
+				if (current == "..") {
+					if (!components.empty() && components.back() != "..") {
+						components.pop_back();
+					} else if (path[0] != '/') {
+						// 相対パスの場合のみ .. を許可
+						components.push_back(current);
+					}
+				} else if (current != ".") {
+					components.push_back(current);
+				}
+				current.clear();
+			}
+		} else {
+			current += c;
+		}
+	}
+
+	// 最後のコンポーネントを処理
+	if (!current.empty()) {
+		if (current == "..") {
+			if (!components.empty() && components.back() != "..") {
+				components.pop_back();
+			} else if (path[0] != '/') {
+				components.push_back(current);
+			}
+		} else if (current != ".") {
+			components.push_back(current);
+		}
+	}
+
+	std::string result;
+	if (path[0] == '/') {
+		result = "/";
+	}
+
+	for (size_t i = 0; i < components.size(); ++i) {
+		if (i > 0 || result.empty()) {
+			result += "/";
+		}
+		result += components[i];
+	}
+
+	return result.empty() ? "." : result;
+}
+
+// 危険な文字をチェック
+bool has_dangerous_chars(std::string const &path)
+{
+	// NULL文字、制御文字、危険な文字をチェック
+	for (char c : path) {
+		if (c == '\0' || c < 32 || c == 127) {
+			return true;
+		}
+		// Windows系の危険な文字も念のためチェック
+		if (c == '<' || c == '>' || c == '|' || c == '"' || c == '*' || c == '?') {
+			return true;
+		}
+	}
+	return false;
+}
+
+// 危険なパスパターンをチェック
+bool has_dangerous_patterns(std::string const &path)
+{
+	// 明示的な危険パターン
+	const std::vector<std::string> dangerous_patterns = {
+		"../",     // パストラバーサル
+		// "./",      // カレントディレクトリ（相対パス）
+		"//",      // 重複スラッシュ
+		"\\",      // バックスラッシュ
+		// "~",       // ホームディレクトリ
+	};
+
+	for (const auto& pattern : dangerous_patterns) {
+		if (path.find(pattern) != std::string::npos) {
+			return true;
+		}
+	}
+
+	// 特殊なファイル名パターン
+	const std::vector<std::string> special_names = {
+		// ".",       // カレントディレクトリ
+		"..",      // 親ディレクトリ
+		"CON", "PRN", "AUX", "NUL",  // Windows予約名
+		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+		"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+	};
+
+	// パスの各コンポーネントをチェック
+	std::string current;
+	for (char c : path) {
+		if (c == '/') {
+			if (!current.empty()) {
+				for (const auto& name : special_names) {
+					if (current == name) {
+						return true;
+					}
+				}
+				current.clear();
+			}
+		} else {
+			current += c;
+		}
+	}
+
+	// 最後のコンポーネントもチェック
+	if (!current.empty()) {
+		for (const auto& name : special_names) {
+			if (current == name) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+}
+
+// パスの安全性を検証する関数
+bool is_safe_path(std::string const &path)
+{
+	// 空のパスは危険
+	if (path.empty()) {
+		return false;
+	}
+	
+	// 長すぎるパスは拒否（一般的な制限）
+	if (path.length() > 4096) {
+		return false;
+	}
+	
+	// 危険な文字をチェック
+	if (has_dangerous_chars(path)) {
+		return false;
+	}
+	
+	// 危険なパターンをチェック
+	if (has_dangerous_patterns(path)) {
+		return false;
+	}
+	
+	// 絶対パスの場合、ルートディレクトリより上に行けないかチェック
+	if (path[0] == '/') {
+		std::string normalized = normalize_path(path);
+		// 正規化後にルートより上に行こうとしている場合
+		if (normalized.find("../") != std::string::npos) {
+			return false;
+		}
+	}
+	
+	// 相対パスの場合、現在のディレクトリより上に行けないかチェック
+	else {
+		std::string normalized = normalize_path(path);
+		// 正規化後に .. が残っている場合（上位ディレクトリへの移動）
+		if (normalized.find("..") != std::string::npos) {
+			return false;
+		}
+	}
+	
+	return true;
+}
+
+// パスを安全に正規化する関数
+std::string safe_normalize_path(std::string const &path)
+{
+	if (!is_safe_path(path)) {
+		return "";  // 危険なパスは空文字列を返す
+	}
+	return normalize_path(path);
+}
+
+// コマンドの安全性をチェックする関数群
+namespace {
+// 危険なコマンド文字をチェック
+bool has_dangerous_command_chars(const std::string& command) {
+	// コマンドインジェクションで使用される危険な文字
+	const std::vector<char> dangerous_chars = {
+		';',  // コマンド区切り
+		'&',  // バックグラウンド実行、AND演算子
+		'|',  // パイプ
+		'`',  // バッククォート（コマンド置換）
+		'$',  // 変数展開、コマンド置換
+		'>',  // リダイレクト
+		'<',  // リダイレクト
+		'\n', // 改行
+		'\r', // キャリッジリターン
+		'\\', // エスケープ文字
+	};
+
+	for (char c : command) {
+		// NULL文字や制御文字をチェック
+		if (c == '\0' || (c > 0 && c < 32 && c != '\t' && c != ' ')) {
+			return true;
+		}
+		// 危険な文字をチェック
+		for (char dangerous : dangerous_chars) {
+			if (c == dangerous) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// 危険なコマンドパターンをチェック
+bool has_dangerous_command_patterns(const std::string& command) {
+	const std::vector<std::string> dangerous_patterns = {
+		"&&",     // AND演算子
+		"||",     // OR演算子
+		">>",     // 追記リダイレクト
+		"<<",     // ヒアドキュメント
+		"$((",    // 算術展開
+		"$(",     // コマンド置換
+		"${",     // 変数展開
+		"2>",     // エラーリダイレクト
+		"&>",     // 全リダイレクト
+		"|&",     // パイプとエラー
+	};
+
+	for (const auto& pattern : dangerous_patterns) {
+		if (command.find(pattern) != std::string::npos) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// 許可されたコマンドのホワイトリスト
+bool is_allowed_command(const std::string& command) {
+	// 先頭の空白を除去
+	size_t start = 0;
+	while (start < command.length() && std::isspace(command[start])) {
+		start++;
+	}
+
+	if (start >= command.length()) {
+		return false; // 空のコマンド
+	}
+
+	// コマンド名を抽出（最初の空白またはタブまで）
+	size_t end = start;
+	while (end < command.length() && !std::isspace(command[end])) {
+		end++;
+	}
+
+	std::string cmd_name = command.substr(start, end - start);
+
+	// 許可されたコマンドのホワイトリスト
+	const std::vector<std::string> allowed_commands = {
+		"ls",     // ファイル一覧
+		"pwd",    // 現在のディレクトリ
+		"whoami", // 現在のユーザー
+		"id",     // ユーザーID情報
+		"date",   // 日付
+		"uname",  // システム情報
+		"df",     // ディスク使用量
+		"free",   // メモリ使用量
+		"uptime", // システム稼働時間
+		"cat",    // ファイル内容表示（引数チェック必要）
+		"head",   // ファイルの先頭表示
+		"tail",   // ファイルの末尾表示
+		"wc",     // 文字数・行数カウント
+		"echo",   // 文字列出力
+		"which",  // コマンドパス表示
+		"type",   // コマンドタイプ表示
+	};
+
+	for (const auto& allowed : allowed_commands) {
+		if (cmd_name == allowed) {
+			return true;
+		}
+	}
+
+	return false;
+}
+}
+
+// コマンドの安全性を検証する関数
+bool is_safe_command(const std::string& command) {
+	// 空のコマンドは危険
+	if (command.empty()) {
+		return false;
+	}
+	
+	// 長すぎるコマンドは拒否
+	if (command.length() > 1000) {
+		return false;
+	}
+	
+	// 危険な文字をチェック
+	if (has_dangerous_command_chars(command)) {
+		return false;
+	}
+	
+	// 危険なパターンをチェック
+	if (has_dangerous_command_patterns(command)) {
+		return false;
+	}
+	
+	// ホワイトリストによるチェック
+	if (!is_allowed_command(command)) {
+		return false;
+	}
+	
+	return true;
+}
+
+// コマンドを安全にサニタイズする関数
+std::string sanitize_command(const std::string& command) {
+	if (!is_safe_command(command)) {
+		return "";  // 危険なコマンドは空文字列を返す
+	}
+	
+	// 追加のサニタイズ処理
+	std::string sanitized = command;
+	
+	// 前後の空白を除去
+	size_t start = 0;
+	while (start < sanitized.length() && std::isspace(sanitized[start])) {
+		start++;
+	}
+	
+	size_t end = sanitized.length();
+	while (end > start && std::isspace(sanitized[end - 1])) {
+		end--;
+	}
+	
+	return sanitized.substr(start, end - start);
+}
+
 std::string to_string(ssh_string s)
 {
 	if (s) {
@@ -49,7 +390,7 @@ struct Quissh::SftpSimpleCommand {
 	SftpSimpleCommand(Quissh *that, std::string name);
 	int operator()(MKDIR &cmd);
 	int operator()(RMDIR &cmd);
-	int visit(SftpCmd &cmd);
+	bool visit(SftpCmd &cmd);
 };
 
 struct Quissh::Private {
@@ -75,8 +416,20 @@ Quissh::~Quissh()
 
 bool Quissh::exec(char const *command, std::function<bool(char const *, int)> writer)
 {
+	// コマンドの安全性をチェック
+	if (!command || !*command) {
+		fprintf(stderr, "Command is not specified.\n");
+		return false;
+	}
+	
+	std::string safe_cmd = sanitize_command(command);
+	if (safe_cmd.empty()) {
+		fprintf(stderr, "Unsafe command detected.\n");
+		return false;
+	}
+
 	int rc;
-	char buffer[256];
+	char buffer[1024];
 	int nbytes;
 
 	m->channel = ssh_channel_new(m->session);
@@ -91,7 +444,7 @@ bool Quissh::exec(char const *command, std::function<bool(char const *, int)> wr
 		return false;
 	}
 
-	rc = ssh_channel_request_exec(m->channel, command);
+	rc = ssh_channel_request_exec(m->channel, safe_cmd.c_str());
 	if (rc != SSH_OK) {
 		fprintf(stderr, "Failed to execute command: %s\n", ssh_get_error(m->session));
 		return false;
@@ -111,6 +464,16 @@ void Quissh::clear_error()
 
 bool Quissh::open(char const *host, int port, AuthVar authdata)
 {
+	if (!host || !*host) {
+		fprintf(stderr, "Host is not specified.\n");
+		return false;
+	}
+
+	if (port <= 0 || port > 65535) {
+		fprintf(stderr, "Invalid port number: %d\n", port);
+		return false;
+	}
+
 	int rc;
 
 	close();
@@ -126,7 +489,7 @@ bool Quissh::open(char const *host, int port, AuthVar authdata)
 
 	rc = ssh_connect(m->session);
 	if (rc != SSH_OK) {
-		fprintf(stderr, "Error connecting to %s: %s\n", host, ssh_get_error(m->session));
+		fprintf(stderr, "Connection failed: %s\n", ssh_get_error(m->session));
 		return false;
 	}
 
@@ -137,7 +500,6 @@ bool Quissh::open(char const *host, int port, AuthVar authdata)
 	}
 
 	m->connected = true;
-
 	return true;
 }
 
@@ -170,12 +532,24 @@ bool Quissh::is_connected() const
 
 bool Quissh::sftp_mkdir(std::string const &name)
 {
+	// パスの安全性をチェック
+	if (!is_safe_path(name)) {
+		fprintf(stderr, "Unsafe path detected\n");
+		return false;
+	}
+	
 	SftpCmd cmd = MKDIR {};
 	return SftpSimpleCommand { this, name }.visit(cmd);
 }
 
 bool Quissh::sftp_rmdir(std::string const &name)
 {
+	// パスの安全性をチェック
+	if (!is_safe_path(name)) {
+		fprintf(stderr, "Unsafe path detected\n");
+		return false;
+	}
+	
 	SftpCmd cmd = RMDIR {};
 	return SftpSimpleCommand { this, name }.visit(cmd);
 }
@@ -184,6 +558,12 @@ bool Quissh::sftp_rmdir(std::string const &name)
 
 bool Quissh::scp_push_file(std::string const &path, std::function<int(char *, int)> reader, size_t size) // scp is deprecated
 {
+	// パスの安全性をチェック
+	if (!is_safe_path(path)) {
+		fprintf(stderr, "Unsafe path detected\n");
+		return false;
+	}
+
 	std::string dir;
 	std::string name = path;
 	{
@@ -227,8 +607,6 @@ bool Quissh::scp_push_file(std::string const &path, std::function<int(char *, in
 
 bool Quissh::sftp_open()
 {
-	sftp_close();
-
 	if (!m->sftp) {
 		m->sftp = sftp_new(m->session);
 		if (!m->sftp) {
@@ -294,6 +672,12 @@ static Quissh::FileAttribute make_file_attribute(sftp_attributes const &st)
 
 std::optional<std::vector<Quissh::FileAttribute>> Quissh::sftp_ls(std::string const &path)
 {
+	// パスの安全性をチェック
+	if (!is_safe_path(path)) {
+		fprintf(stderr, "Unsafe path detected\n");
+		return std::nullopt;
+	}
+
 	std::vector<FileAttribute> ret;
 
 	DIR d(*this);
@@ -318,6 +702,12 @@ Quissh::FileAttribute Quissh::sftp_stat(std::string const &path)
 
 bool Quissh::sftp_push_file(std::string const &path, std::function<int(char *, int)> reader)
 {
+	// パスの安全性をチェック
+	if (!is_safe_path(path)) {
+		fprintf(stderr, "Unsafe path detected\n");
+		return false;
+	}
+
 	if (!sftp_open()) return false;
 
 	sftp_file file = ::sftp_open(m->sftp, path.c_str(), O_WRONLY | O_CREAT, 0644);
@@ -340,13 +730,15 @@ bool Quissh::sftp_push_file(std::string const &path, std::function<int(char *, i
 
 bool Quissh::scp_pull_file(std::function<bool(char const *, int)> writer) // scp is deprecated
 {
+	if (!sftp_open()) return false;
+
 	std::string remote_file = "/tmp/example.txt";
 
 	char buffer[1024];
 	int nbytes;
-	int total = 0;
+	size_t total = 0;
 
-	if (!m->sftp) {
+	if (!m->scp) {
 		m->scp = ssh_scp_new(m->session, SSH_SCP_READ, remote_file.c_str());
 		if (m->scp == NULL) {
 			fprintf(stderr, "Error initializing SCP session: %s\n", ssh_get_error(m->session));
@@ -377,7 +769,8 @@ bool Quissh::scp_pull_file(std::function<bool(char const *, int)> writer) // scp
 	//
 	total = 0;
 	while (total < size) {
-		nbytes = ssh_scp_read(m->scp, buffer, size - total);
+		nbytes = std::min(sizeof(buffer), size - total);
+		nbytes = ssh_scp_read(m->scp, buffer, nbytes);
 		if (nbytes < 0) {
 			fprintf(stderr, "Error receiving file: %s\n", ssh_get_error(m->session)); // エラーメッセージを表示
 			break;
@@ -392,26 +785,17 @@ bool Quissh::scp_pull_file(std::function<bool(char const *, int)> writer) // scp
 
 bool Quissh::sftp_pull_file(std::string const &remote_path, std::function<int(char *, int)> writer)
 {
-	sftp_session sftp;
-	sftp_file file;
-	int rc;
-
-	sftp = sftp_new(m->session);
-	if (!sftp) {
-		fprintf(stderr, "Failed to create SFTP session: %s\n", ssh_get_error(m->session));
+	// リモートパスの安全性をチェック
+	if (!is_safe_path(remote_path)) {
+		fprintf(stderr, "Unsafe remote path detected: %s\n", remote_path.c_str());
 		return false;
 	}
 
-	rc = sftp_init(sftp);
-	if (rc != SSH_OK) {
-		fprintf(stderr, "Failed to initialize SFTP: %s\n", ssh_get_error(m->session));
-		return false;
-	}
+	if (!sftp_open()) return false;
 
-	file = ::sftp_open(sftp, remote_path.c_str(), O_RDONLY, 0);
+	sftp_file file = ::sftp_open(m->sftp, remote_path.c_str(), O_RDONLY, 0);
 	if (!file) {
 		fprintf(stderr, "Failed to open file: %s\n", ssh_get_error(m->session));
-		sftp_free(sftp);
 		return false;
 	}
 
@@ -436,32 +820,21 @@ bool Quissh::pull_file(std::string const &remote_path, std::function<int(char co
 	return sftp_pull_file(remote_path, writer);
 }
 
-struct stat Quissh::stat(std::string const &path)
+std::optional<struct stat> Quissh::stat(std::string const &path)
 {
-	struct stat st;
-	sftp_attributes attr;
-	m->sftp = sftp_new(m->session);
-	if (!m->sftp) {
-		fprintf(stderr, "Failed to create SFTP session: %s\n", ssh_get_error(m->session));
+	struct stat st = {};
+	if (is_sftp_connected()) {
+		sftp_attributes attr = ::sftp_stat(m->sftp, path.c_str());
+		if (!attr) {
+			fprintf(stderr, "Failed to stat file: %s\n", ssh_get_error(m->session));
+			return st;
+		}
+		st.st_size = attr->size;
+		st.st_mode = attr->permissions;
+		sftp_attributes_free(attr);
 		return st;
 	}
-
-	if (sftp_init(m->sftp) != SSH_OK) {
-		fprintf(stderr, "Failed to initialize SFTP: %s\n", ssh_get_error(m->session));
-		return st;
-	}
-
-	attr = ::sftp_stat(m->sftp, path.c_str());
-	if (!attr) {
-		fprintf(stderr, "Failed to stat file: %s\n", ssh_get_error(m->session));
-		sftp_free(m->sftp);
-		return st;
-	}
-	st.st_size = attr->size;
-	st.st_mode = attr->permissions;
-	sftp_attributes_free(attr);
-
-	return st;
+	return std::nullopt;
 }
 
 Quissh::Auth::Auth(ssh_session session)
@@ -472,7 +845,6 @@ Quissh::Auth::Auth(ssh_session session)
 int Quissh::Auth::operator()(PasswdAuth &auth)
 {
 	ssh_options_set(session, SSH_OPTIONS_USER, auth.uid.c_str());
-	return ssh_userauth_password(session, NULL, auth.pwd.c_str());
 	if (auth.pwd.empty()) {
 		return ssh_userauth_none(session, NULL);
 	} else {
@@ -506,17 +878,10 @@ int Quissh::SftpSimpleCommand::operator()(RMDIR &cmd)
 	return ::sftp_rmdir(that->m->sftp, name_.c_str());
 }
 
-int Quissh::SftpSimpleCommand::visit(SftpCmd &cmd)
+bool Quissh::SftpSimpleCommand::visit(SftpCmd &cmd)
 {
-	that->m->sftp = sftp_new(that->m->session);
-	if (!that->m->sftp) {
-		fprintf(stderr, "Failed to create SFTP session: %s\n", ssh_get_error(that->m->session));
-		return false;
-	}
-
-	if (sftp_init(that->m->sftp) != SSH_OK) {
-		fprintf(stderr, "Failed to initialize SFTP: %s\n", ssh_get_error(that->m->session));
-		sftp_free(that->m->sftp);
+	if (!that->is_sftp_connected()) {
+		fprintf(stderr, "SFTP is not connected.\n");
 		return false;
 	}
 	int rc = std::visit(*this, cmd);
@@ -530,6 +895,16 @@ bool Quissh::SFTP::is_connected() const
 
 bool Quissh::SFTP::push(std::string const &local_path, std::string remote_path)
 {
+	// ローカルパスとリモートパスの安全性をチェック
+	if (!is_safe_path(local_path)) {
+		ssh_.m->error = "Unsafe local path detected"; // + local_path;
+		return false;
+	}
+	if (!is_safe_path(remote_path)) {
+		ssh_.m->error = "Unsafe remote path detected"; // + remote_path;
+		return false;
+	}
+
 	ssh_.clear_error();
 
 	auto Do = [&]() -> bool {
@@ -564,8 +939,8 @@ bool Quissh::SFTP::push(std::string const &local_path, std::string remote_path)
 
 			std::vector<std::string> parts = Split(remote_path);
 			if (parts.empty()) {
-				ssh_.m->error = "Invalid remote path: ";
-				ssh_.m->error += remote_path;
+				ssh_.m->error = "Invalid remote path";
+				// ssh_.m->error += remote_path;
 				return false;
 			}
 			if (!parts.back().empty()) {
@@ -579,20 +954,20 @@ bool Quissh::SFTP::push(std::string const &local_path, std::string remote_path)
 				auto atts = stat(remote_path.c_str());
 				if (atts.isdir()) continue;
 				if (!ssh_.sftp_mkdir(remote_path)) {
-					ssh_.m->error = "Failed to create remote directory: ";
-					ssh_.m->error += remote_path;
+					ssh_.m->error = "Failed to create remote directory";
+					// ssh_.m->error += remote_path;
 					return false;
 				}
 			}
 			remote_path = remote_path / basename;
 		}
 
-		struct stat st;
+		struct stat st = {};
 		if (::stat(local_path.c_str(), &st) == 0) {
 			int fd = ::open(local_path.c_str(), O_RDONLY);
-			if (!fd) {
-				ssh_.m->error = "Failed to open local file: ";
-				ssh_.m->error += local_path;
+			if (fd < 0) {
+				ssh_.m->error = "Failed to open local file";
+				// ssh_.m->error += local_path;
 				return false;
 			}
 			auto Reader = [&](char *ptr, int len) {
@@ -603,8 +978,8 @@ bool Quissh::SFTP::push(std::string const &local_path, std::string remote_path)
 			::close(fd);
 			return r;
 		} else {
-			ssh_.m->error = "Failed to stat local file: ";
-			ssh_.m->error += local_path;
+			ssh_.m->error = "Failed to stat local file";
+			// ssh_.m->error += local_path;
 			return false;
 		}
 	};
@@ -614,6 +989,54 @@ bool Quissh::SFTP::push(std::string const &local_path, std::string remote_path)
 		fprintf(stderr, "%s\n", ssh_.m->error.c_str());
 	}
 	return r;
+}
+
+bool Quissh::SFTP::pull(const std::string &remote_path, const std::string &local_path)
+{
+	// リモートパスとローカルパスの安全性をチェック
+	if (!is_safe_path(remote_path)) {
+		ssh_.m->error = "Unsafe remote path detected"; // + remote_path;
+		return false;
+	}
+	if (!is_safe_path(local_path)) {
+		ssh_.m->error = "Unsafe local path detected"; // + local_path;
+		return false;
+	}
+
+	ssh_.clear_error();
+
+	auto Do = [&]() -> bool {
+		std::string dir;
+		std::string name = local_path;
+		{
+			auto i = name.rfind('/');
+			if (i != std::string::npos) {
+				dir = name.substr(0, i);
+				name = name.substr(i + 1);
+			}
+		}
+
+		bool ret = false;
+
+		int fd = ::open(local_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd != -1) {
+			auto Writer = [&](char const *ptr, int len) {
+				int n = ::write(fd, ptr, len);
+				return n == len;
+			};
+			ret = ssh_.sftp_pull_file(remote_path, Writer);
+			::close(fd);
+		}
+
+		return ret;
+	};
+
+	bool r = Do();
+	if (!r) {
+		fprintf(stderr, "%s\n", ssh_.m->error.c_str());
+	}
+	return r;
+
 }
 
 bool Quissh::FileAttribute::exists() const
@@ -656,6 +1079,12 @@ Quissh::DIR::~DIR()
 
 bool Quissh::DIR::opendir(const char *path)
 {
+	// パスの安全性をチェック
+	if (!path || !is_safe_path(std::string(path))) {
+		fprintf(stderr, "Unsafe path detected\n");
+		return false;
+	}
+	
 	m->dir = sftp_opendir(quissh_.m->sftp, path);
 	return (bool)m->dir;
 }

@@ -3,7 +3,7 @@ build/
 main.d
 main.o
 myapp
-
+.vscode
 
 lib/
 _bin/

@@ -97,7 +97,7 @@ private:
 public:
 	bool push_file(std::string const &path, std::function<int (char *ptr, int len)> reader);
 	bool pull_file(std::string const &remote_path, std::function<int (char const *ptr, int len)> writer);
-	struct stat stat(std::string const &path);
+	std::optional<struct stat> stat(std::string const &path);
 
 	class SFTP {
 	private:
@@ -120,6 +120,14 @@ public:
 			ssh_.sftp_close();
 		}
 		bool is_connected() const;
+		bool mkdir(std::string const &name)
+		{
+			return ssh_.sftp_mkdir(name);
+		}
+		bool rmdir(std::string const &name)
+		{
+			return ssh_.sftp_rmdir(name);
+		}
 		std::optional<std::vector<FileAttribute>> ls(std::string const &path)
 		{
 			return ssh_.sftp_ls(path);
@@ -132,8 +140,13 @@ public:
 		{
 			return ssh_.sftp_stat(path);
 		}
-
 		bool push(std::string const &local_path, std::string remote_path);
+		bool pull(std::string const &remote_path, std::function<int (char const *ptr, int len)> writer)
+		{
+			return ssh_.sftp_pull_file(remote_path, writer);
+		}
+		bool pull(std::string const &remote_path, std::string const &local_path);
+
 	};
 
 	class DIR {

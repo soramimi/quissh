@@ -44,13 +44,12 @@ int main()
 				puts(atts.name.c_str());
 			}
 		}
+		sftp.mkdir("hogehoge");
+		sftp.rmdir("hogehoge");
+		sftp.push("example.txt", Reader);
+		sftp.pull("example.txt", Writer);
 		sftp.close();
 	}
-	// ssh.mkdir("/tmp/hogehoge");
-	// ssh.rmdir("/tmp/hogehoge");
-	// ssh.push_file("/tmp/example.txt", Reader);
-	// ssh.pull_file("/tmp/example.txt", Writer);
-	ssh.close();
 	return 0;
 }
 
