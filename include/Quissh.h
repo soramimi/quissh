@@ -75,6 +75,8 @@ public:
 	bool open(const char *host, int port, AuthVar authdata);
 	void close();
 
+	bool is_connected() const;
+
 	bool exec(char const *cmd, std::function<bool (const char *, int)> writer);
 private:
 	bool sftp_mkdir(std::string const &name);
@@ -85,6 +87,7 @@ private:
 
 	bool sftp_open();
 	bool sftp_close();
+	bool is_sftp_connected() const;
 
 	bool sftp_push_file(std::string const &path, std::function<int (char *ptr, int len)> reader);
 	bool sftp_pull_file(std::string const &remote_path, std::function<int (char *ptr, int len)> writer);
@@ -116,6 +119,7 @@ public:
 		{
 			ssh_.sftp_close();
 		}
+		bool is_connected() const;
 		std::optional<std::vector<FileAttribute>> ls(std::string const &path)
 		{
 			return ssh_.sftp_ls(path);

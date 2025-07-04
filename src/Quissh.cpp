@@ -54,6 +54,8 @@ struct Quissh::SftpSimpleCommand {
 
 struct Quissh::Private {
 	std::string error;
+	bool connected = false;
+	bool sftp_connected = false;
 	ssh_session session = nullptr;
 	ssh_channel channel = nullptr;
 	ssh_scp scp = nullptr;
@@ -111,6 +113,8 @@ bool Quissh::open(char const *host, int port, AuthVar authdata)
 {
 	int rc;
 
+	close();
+
 	m->session = ssh_new();
 	if (!m->session) {
 		fprintf(stderr, "Failed to create SSH session.\n");
@@ -132,11 +136,15 @@ bool Quissh::open(char const *host, int port, AuthVar authdata)
 		return false;
 	}
 
+	m->connected = true;
+
 	return true;
 }
 
 void Quissh::close()
 {
+	m->connected = false;
+
 	if (m->channel) {
 		ssh_channel_close(m->channel);
 		ssh_channel_free(m->channel);
@@ -153,6 +161,11 @@ void Quissh::close()
 		ssh_free(m->session);
 		m->session = nullptr;
 	}
+}
+
+bool Quissh::is_connected() const
+{
+	return m->session && m->connected;
 }
 
 bool Quissh::sftp_mkdir(std::string const &name)
@@ -214,6 +227,8 @@ bool Quissh::scp_push_file(std::string const &path, std::function<int(char *, in
 
 bool Quissh::sftp_open()
 {
+	sftp_close();
+
 	if (!m->sftp) {
 		m->sftp = sftp_new(m->session);
 		if (!m->sftp) {
@@ -227,15 +242,24 @@ bool Quissh::sftp_open()
 			return false;
 		}
 	}
+
+	m->sftp_connected = true;
+
 	return true;
 }
 
 bool Quissh::sftp_close()
 {
+	m->sftp_connected = false;
 	if (!m->sftp) return false;
 	sftp_free(m->sftp);
 	m->sftp = nullptr;
 	return true;
+}
+
+bool Quissh::is_sftp_connected() const
+{
+	return is_connected() && m->sftp && m->sftp_connected;
 }
 
 static Quissh::FileAttribute make_file_attribute(sftp_attributes const &st)
@@ -499,6 +523,11 @@ int Quissh::SftpSimpleCommand::visit(SftpCmd &cmd)
 	return rc == SSH_OK;
 }
 
+bool Quissh::SFTP::is_connected() const
+{
+	return ssh_.is_connected() && ssh_.is_sftp_connected();
+}
+
 bool Quissh::SFTP::push(std::string const &local_path, std::string remote_path)
 {
 	ssh_.clear_error();
@@ -644,12 +673,15 @@ void Quissh::DIR::closedir()
 
 std::optional<Quissh::FileAttribute> Quissh::DIR::readdir()
 {
-	FileAttribute ret;
-	sftp_attributes a = sftp_readdir(quissh_.m->sftp, m->dir);
-	if (!a) return std::nullopt;
-	ret = make_file_attribute(a);
-	sftp_attributes_free(a);
-	return ret;
+	if (quissh_.m->sftp && m->dir) {
+		FileAttribute ret;
+		sftp_attributes a = sftp_readdir(quissh_.m->sftp, m->dir);
+		if (!a) return std::nullopt;
+		ret = make_file_attribute(a);
+		sftp_attributes_free(a);
+		return ret;
+	}
+	return std::nullopt;
 }
 
 //
